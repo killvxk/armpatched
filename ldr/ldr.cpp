@@ -3,6 +3,8 @@
 #include "skci_hack.h"
 #include "krnl_hack.h"
 #include "ndis_hack.h"
+#include "ntdll_hack.h"
+#include "rpcrt4_hack.h"
 #include "../source/armadillo.h"
 
 void usage(const wchar_t *progname)
@@ -105,20 +107,23 @@ int wmain(int argc, wchar_t **argv)
        continue;
      // dump PE directories
      printf("ImageBase: %I64X\n", f.image_base());
-     for ( const auto &diter : dir_get )
+     if ( verb_mode )
      {
-       DWORD addr = 0;
-       DWORD size = 0;
-       if ( ! (f.*(diter.first))(addr, size) )
-         continue;
-       printf("%s dir: rva %X size %X\n", diter.second, addr, size);
-       const one_section *where = f.find_section_rva(addr);
-       if ( NULL == where )
-         continue;
-       if (where->offset)
-         printf(" in section %s, file offset %X\n", where->name, where->offset + addr - where->va);
-       else
-         printf(" in section %s\n", where->name);
+       for ( const auto &diter : dir_get )
+       {
+         DWORD addr = 0;
+         DWORD size = 0;
+         if ( ! (f.*(diter.first))(addr, size) )
+           continue;
+         printf("%s dir: rva %X size %X\n", diter.second, addr, size);
+         const one_section *where = f.find_section_rva(addr);
+         if ( NULL == where )
+           continue;
+         if (where->offset)
+           printf(" in section %s, file offset %X\n", where->name, where->offset + addr - where->va);
+         else
+           printf(" in section %s\n", where->name);
+       }
      }
      // read exports
      exports_dict *ed = f.get_export_dict();
@@ -230,6 +235,20 @@ int wmain(int argc, wchar_t **argv)
              skci.hack(verb_mode);
              skci.dump();
            }
+         } else if ( !_stricmp(exp_name, "ntdll.dll") )
+         {
+           krnl = 0;
+           ntdll_hack ntdll(&f, ed);
+           ed = NULL; // will be killed inside ~arm64_hack
+           ntdll.hack(verb_mode);
+           ntdll.dump();
+         } else if ( !_stricmp(exp_name, "rpcrt4.dll") )
+         {
+           krnl = 0;
+           rpcrt4_hack rpcrt4(&f, ed);
+           ed = NULL; // will be killed inside ~arm64_hack
+           rpcrt4.hack(verb_mode);
+           rpcrt4.dump();
          }
        }
        if ( krnl )

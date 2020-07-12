@@ -151,6 +151,16 @@ int arm64_hack::is_ldrb() const
   ;
 }
 
+int arm64_hack::is_ldrh() const
+{
+  return (m_dis.instr_id == AD_INSTR_LDRH) && 
+         (m_dis.num_operands == 3) &&
+         (m_dis.operands[0].type == AD_OP_REG) &&
+         (m_dis.operands[1].type == AD_OP_REG) &&
+         (m_dis.operands[2].type == AD_OP_IMM)
+  ;
+}
+
 int arm64_hack::is_ldr() const
 {
   return (m_dis.instr_id == AD_INSTR_LDR) && 
@@ -158,6 +168,15 @@ int arm64_hack::is_ldr() const
          (m_dis.operands[0].type == AD_OP_REG) &&
          (m_dis.operands[1].type == AD_OP_REG) &&
          (m_dis.operands[2].type == AD_OP_IMM)
+  ;
+}
+
+int arm64_hack::is_ldr_rr() const
+{
+  return (m_dis.instr_id == AD_INSTR_LDR) && 
+         (m_dis.num_operands == 2) &&
+         (m_dis.operands[0].type == AD_OP_REG) &&
+         (m_dis.operands[1].type == AD_OP_REG)
   ;
 }
 
@@ -216,7 +235,7 @@ int arm64_hack::find_first_jmp(PBYTE addr, PBYTE &out)
 {
   if ( !setup(addr) )
     return 0;
-  for ( DWORD i = 0; i < 10; i++ )
+  for ( DWORD i = 0; i < 12; i++ )
   {
     if ( !disasm() || is_ret() )
       return 0;
@@ -264,6 +283,16 @@ int arm64_hack::find_first_load(PBYTE addr, const char *s_name, PBYTE &out)
     }
   }
   return (out != NULL);
+}
+
+void arm64_hack::init_aux(const char *aux_name, PBYTE &aux)
+{
+  aux = NULL;
+  if ( m_ed == NULL )
+    return;
+  const export_item *exp = m_ed->find(aux_name);
+  if ( exp != NULL )
+    aux = m_pe->base_addr() + exp->rva;
 }
 
 struct pdata_item

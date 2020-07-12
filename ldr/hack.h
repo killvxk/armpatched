@@ -62,6 +62,149 @@ class regs_pad
    reg64_t m_regs[AD_REG_SP];
 };
 
+// for xrefs search
+struct adr_holder
+{
+  PBYTE addr;
+  PBYTE where;
+  inline void reset()
+  {
+    addr = where = NULL;
+  }
+  adr_holder()
+  {
+    reset();
+  }
+};
+
+class xref_finder
+{
+  public:
+   xref_finder()
+   {
+     reset();
+   }
+   void reset()
+   {
+     for ( DWORD i = 0; i < _countof(m_regs); i++ )
+       m_regs[i].reset();
+     disasm_cnt = adrp_cnt = add_cnt = 0;
+   }
+   int purge(int i, PBYTE addr)
+   {
+     if ( NULL == m_regs[i].where )
+       return 0;
+     // 40 - 10 opcodes
+     if ( m_regs[i].where > addr - 40 )
+       return 1;
+     m_regs[i].reset();
+     return 0;
+   }
+   // find pair of adrp/add pointing to what
+   PBYTE find(PBYTE start, DWORD size, PBYTE what)
+   {
+     size &= ~3;
+     struct ad_insn dis;
+     int reg_n;
+     for ( DWORD i = 0; i < size / sizeof(DWORD); i++, start += 4 )
+     {
+       DWORD val = *(PDWORD)start;
+       // check for adrp
+       if ( (val & 0x9f000000) == 0x90000000 )
+       {
+         if ( ArmadilloDisassemble(val, (ULONGLONG)start, &dis) )
+           continue;
+         disasm_cnt++;
+         if ( dis.instr_id != AD_INSTR_ADRP )
+           continue;
+         adrp_cnt++;
+         reg_n = dis.operands[0].op_reg.rn;
+         if ( reg_n >= AD_REG_SP )
+           continue;
+         m_regs[reg_n].addr = (PBYTE)dis.operands[1].op_imm.bits;
+         if ( m_regs[reg_n].addr == what )
+           return start;
+         m_regs[reg_n].where = start;
+         continue;
+       }
+       // check for add
+       if ( (val & 0x7f000000) == 0x11000000 )
+       {
+         if ( ArmadilloDisassemble(val, (ULONGLONG)start, &dis) )
+           continue;
+         disasm_cnt++;
+         if ( dis.instr_id != AD_INSTR_ADD )
+           continue;
+         add_cnt++;
+         reg_n = dis.operands[1].op_reg.rn;
+         if ( reg_n >= AD_REG_SP )
+           continue;
+         if ( !purge(reg_n, start) )
+           continue;
+         if ( NULL == m_regs[reg_n].addr )
+           continue;
+         if ( m_regs[reg_n].addr + (reg64_t)dis.operands[2].op_imm.bits == what )
+           return start;
+       }
+     }
+     return NULL;
+   }
+   // find pair of adrp/ldr pointing to what
+   PBYTE find_ldr(PBYTE start, DWORD size, PBYTE what)
+   {
+     size &= ~3;
+     struct ad_insn dis;
+     int reg_n;
+     for ( DWORD i = 0; i < size / sizeof(DWORD); i++, start += 4 )
+     {
+       DWORD val = *(PDWORD)start;
+       // check for adrp
+       if ( (val & 0x9f000000) == 0x90000000 )
+       {
+         if ( ArmadilloDisassemble(val, (ULONGLONG)start, &dis) )
+           continue;
+         disasm_cnt++;
+         if ( dis.instr_id != AD_INSTR_ADRP )
+           continue;
+         adrp_cnt++;
+         reg_n = dis.operands[0].op_reg.rn;
+         if ( reg_n >= AD_REG_SP )
+           continue;
+         m_regs[reg_n].addr = (PBYTE)dis.operands[1].op_imm.bits;
+         if ( m_regs[reg_n].addr == what )
+           return start;
+         m_regs[reg_n].where = start;
+         continue;
+       }
+       // check for ldr
+       if ( (val & 0xb9400000) == 0xbfc00000 )
+       {
+         if ( ArmadilloDisassemble(val, (ULONGLONG)start, &dis) )
+           continue;
+         disasm_cnt++;
+         if ( dis.instr_id != AD_INSTR_LDR )
+           continue;
+         add_cnt++;
+         reg_n = dis.operands[1].op_reg.rn;
+         if ( reg_n >= AD_REG_SP )
+           continue;
+         if ( !purge(reg_n, start) )
+           continue;
+         if ( NULL == m_regs[reg_n].addr )
+           continue;
+         if ( m_regs[reg_n].addr + (reg64_t)dis.operands[2].op_imm.bits == what )
+           return start;
+       }
+     }
+     return NULL;
+   }
+   DWORD disasm_cnt;
+   DWORD adrp_cnt;
+   DWORD add_cnt;
+  protected:
+   adr_holder m_regs[AD_REG_SP];
+};
+
 // some base class for all hacks
 class arm64_hack
 {
@@ -69,6 +212,7 @@ class arm64_hack
    arm64_hack(arm64_pe_file *pe, exports_dict *ed);
    virtual ~arm64_hack();   
   protected:
+   void init_aux(const char *, PBYTE &aux);
    void fill_lc();
    // disasm methods
    int setup(PBYTE psp)
@@ -144,6 +288,37 @@ class arm64_hack
       }
       return 0;
     }
+    template <typename T, typename S>
+    int check_jmps(T &graph, S state)
+    {
+      PBYTE addr = NULL;
+      if ( is_cbnz_jimm(addr) )
+      {
+        graph.add(addr, state);
+        return 1;
+      }
+      if ( is_cbz_jimm(addr) )
+      {
+        graph.add(addr, state);
+        return 1;
+      }
+      if ( is_tbz_jimm(addr) )
+      {
+        graph.add(addr, state);
+        return 1;
+      }
+      if ( is_tbnz_jimm(addr) )
+      {
+        graph.add(addr, state);
+        return 1;
+      }
+      if ( is_bxx_jimm(addr) )
+      {
+        graph.add(addr, state);
+        return 1;
+      }
+      return 0;
+    }
    // variadic methods
    template <typename T>
    int is_xx(T op) const
@@ -181,6 +356,10 @@ class arm64_hack
    int is_b_jimm(PBYTE &addr) const;
    int is_bxx_jimm(PBYTE &addr) const;
    int is_bl_jimm(PBYTE &addr) const;
+   inline int is_br_reg() const
+   {
+     return (m_dis.instr_id == AD_INSTR_BR && m_dis.num_operands == 1 && m_dis.operands[0].type == AD_OP_REG);
+   }
    inline int is_bl_reg() const
    {
      return (m_dis.instr_id == AD_INSTR_BLR && m_dis.num_operands == 1 && m_dis.operands[0].type == AD_OP_REG);
@@ -210,10 +389,16 @@ class arm64_hack
    }
    int is_add() const;
    int is_ldr() const;
+   int is_ldrh() const;
+   int is_ldr_rr() const;
    int is_ldr_off() const;
    int is_ldrb() const;
    int is_ldrsb() const;
    int is_str() const;
+   inline int is_cmp_rimm() const
+   {
+     return (m_dis.instr_id == AD_INSTR_CMP && m_dis.num_operands == 2 && m_dis.operands[0].type == AD_OP_REG && m_dis.operands[1].type == AD_OP_IMM);
+   }
    inline int is_mov_rimm() const
    {
      return (m_dis.instr_id == AD_INSTR_MOV && m_dis.num_operands == 2 && m_dis.operands[0].type == AD_OP_REG && m_dis.operands[1].type == AD_OP_IMM);

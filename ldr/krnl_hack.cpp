@@ -3,22 +3,16 @@
 #include "cf_graph.h"
 #include "bm_search.h"
 
-void ntoskrnl_hack::init_aux(const char *aux_name, PBYTE &aux)
-{
-  aux = NULL;
-  if ( m_ed == NULL )
-    return;
-  const export_item *exp = m_ed->find(aux_name);
-  if ( exp != NULL )
-    aux = m_pe->base_addr() + exp->rva;
-}
-
 void ntoskrnl_hack::zero_data()
 {
   // fill auxilary data
+  init_aux("KeAcquireSpinLockAtDpcLevel", aux_KeAcquireSpinLockAtDpcLevel);
+  init_aux("ExAcquireSpinLockExclusiveAtDpcLevel", aux_ExAcquireSpinLockExclusiveAtDpcLevel);
   init_aux("KeAcquireSpinLockRaiseToDpc", aux_KeAcquireSpinLockRaiseToDpc);
   init_aux("ExAcquirePushLockExclusiveEx", aux_ExAcquirePushLockExclusiveEx);
+  init_aux("ObReferenceObjectByPointer", aux_ObReferenceObjectByPointer);
   init_aux("ObReferenceObjectByHandle", aux_ObReferenceObjectByHandle);
+  init_aux("ObOpenObjectByPointer", aux_ObOpenObjectByPointer);
   init_aux("ExAcquireFastMutexUnsafe", aux_ExAcquireFastMutexUnsafe);
   init_aux("ExAcquireFastMutex", aux_ExAcquireFastMutex);
   init_aux("KeAcquireGuardedMutex", aux_KeAcquireGuardedMutex);
@@ -31,21 +25,36 @@ void ntoskrnl_hack::zero_data()
   init_aux("ExAllocatePoolWithTag", aux_ExAllocatePoolWithTag);
   init_aux("ExEnumHandleTable", aux_ExEnumHandleTable);
   init_aux("ExfUnblockPushLock", aux_ExfUnblockPushLock);
-  aux_ExAllocateCallBack = aux_ExCompareExchangeCallBack = NULL;
+  init_aux("RtlImageNtHeader", aux_RtlImageNtHeader);
+  init_aux("PsInitialSystemProcess", aux_PsInitialSystemProcess);
+  aux_PsGetCurrentServerSiloGlobals = aux_ExAllocateCallBack = aux_ExCompareExchangeCallBack = aux_KxAcquireSpinLock =
+  aux_dispatch_icall = aux_tp_stab = NULL;
   // zero output data
+  m_CmpTraceRoutine = NULL;
+  m_HvlpAa64Connected = m_HvlpFlags = NULL;
+  m_CrashdmpCallTable = NULL;
+  init_silo();
+  init_emp();
+  init_wmi();
+  init_bugcheck_data();
+  m_MiGetPteAddress = m_pte_base_addr = NULL;
   eproc_ObjectTable_off = ObjectTable_pushlock_off = eproc_ProcessLock_off = 0;
+  m_CmRegistryTransactionType = m_ExpKeyedEventObjectType = m_ExpWorkerFactoryObjectType = m_IopWaitCompletionPacketObjectType = m_ObpDirectoryObjectType = NULL;
   m_ExNPagedLookasideLock = NULL;
   m_ExNPagedLookasideListHead = NULL;
   m_ExPagedLookasideLock = NULL;
   m_ExPagedLookasideListHead = NULL;
-  m_KiDynamicTraceEnabled = m_KiTpStateLock = m_KiTpHashTable = NULL;
-  m_stack_base_off = m_stack_limit_off = m_thread_id_off = m_thread_process_off = m_thread_prevmod_off = 0;
-  m_proc_pid_off = m_proc_protection_off = m_proc_debport_off = 0;
+  m_KiSystemServiceTraceCallbackTable_size = 0;
+  init_tracepoints();
+  m_stack_base_off = m_stack_limit_off = m_thread_id_off = m_thread_process_off = m_thread_prevmod_off = m_thread_silo_off = m_thread_TopLevelIrp_off = 0;
+  m_proc_pid_off = m_proc_peb_off = m_proc_job_off = m_proc_protection_off = m_proc_debport_off = m_proc_flags3_off = m_proc_secport_off = m_proc_wow64_off = m_proc_win32proc_off = m_proc_DxgProcess_off = 0;
   m_KeLoaderBlock = m_KiServiceLimit = m_KiServiceTable = m_SeCiCallbacks = NULL;
   m_SeCiCallbacks_size = 0;
-  m_ObHeaderCookie = m_ObTypeIndexTable = m_ObpSymbolicLinkObjectType = m_AlpcPortObjectType = NULL;
+  m_ObHeaderCookie = m_ObTypeIndexTable = m_ObpSymbolicLinkObjectType = m_AlpcPortObjectType = m_DbgkDebugObjectType = m_ExProfileObjectType = m_EtwpRegistrationObjectType = NULL;
+  init_dbg_data();
   m_PsWin32CallBack = NULL;
   m_PspLoadImageNotifyRoutine = m_PspLoadImageNotifyRoutineCount = NULL;
+  m_CmpCallbackListLock = m_CallbackListHead = NULL;
   m_PspCreateThreadNotifyRoutine = m_PspCreateThreadNotifyRoutineCount = NULL;
   m_SepRmNotifyMutex = m_SeFileSystemNotifyRoutinesExHead = NULL;
   m_ExpHostListLock = m_ExpHostList = NULL;
@@ -58,6 +67,11 @@ void ntoskrnl_hack::zero_data()
 void ntoskrnl_hack::dump() const
 {
   PBYTE mz = m_pe->base_addr();
+  if ( aux_dispatch_icall != NULL )
+    printf("guard_dispatch_icall: %p\n", PVOID(aux_dispatch_icall - mz));
+  if ( m_CrashdmpCallTable != NULL ) 
+    printf("CrashdmpCallTable: %p\n", PVOID(m_CrashdmpCallTable - mz));
+  // lookaside lists & locks
   if ( m_ExNPagedLookasideLock != NULL )
     printf("ExNPagedLookasideLock: %p\n", PVOID(m_ExNPagedLookasideLock - mz));
   if ( m_ExNPagedLookasideListHead != NULL )
@@ -66,18 +80,16 @@ void ntoskrnl_hack::dump() const
     printf("ExPagedLookasideLock: %p\n", PVOID(m_ExPagedLookasideLock - mz));
   if ( m_ExPagedLookasideListHead != NULL )
     printf("ExPagedLookasideListHead: %p\n", PVOID(m_ExPagedLookasideListHead - mz));
+  // etw
+  if ( m_CmpTraceRoutine != NULL )
+    printf("CmpTraceRoutine: %p\n", PVOID(m_CmpTraceRoutine - mz));
   // dump pnp data
-  if ( m_PnpDeviceClassNotifyLock != NULL )
-    printf("PnpDeviceClassNotifyLock: %p\n", PVOID(m_PnpDeviceClassNotifyLock - mz));
-  if ( m_PnpDeviceClassNotifyList != NULL )
-    printf("PnpDeviceClassNotifyList: %p, item_size %X\n", PVOID(m_PnpDeviceClassNotifyList - mz), m_pnp_item_size);
+  dump_pnp(mz);
   // dump tracepoints
-  if ( m_KiDynamicTraceEnabled != NULL ) 
-    printf("KiDynamicTraceEnabled: %p\n", PVOID(m_KiDynamicTraceEnabled - mz));
-  if ( m_KiTpStateLock != NULL )
-    printf("KiTpStateLock: %p\n", PVOID(m_KiTpStateLock - mz));
-  if ( m_KiTpHashTable != NULL )
-    printf("KiTpHashTable: %p\n", PVOID(m_KiTpHashTable - mz));
+  dump_tracepoints(mz);
+  // bugcheck data
+  dump_bugcheck_data(mz);
+
   if ( m_KeLoaderBlock != NULL )
     printf("KeLoaderBlock: %p\n", PVOID(m_KeLoaderBlock - mz));
   if ( m_KiServiceLimit != NULL )
@@ -92,14 +104,35 @@ void ntoskrnl_hack::dump() const
     printf("ObTypeIndexTable: %p\n", PVOID(m_ObTypeIndexTable - mz));
   if ( m_ObpSymbolicLinkObjectType != NULL ) 
     printf("ObpSymbolicLinkObjectType: %p\n", PVOID(m_ObpSymbolicLinkObjectType - mz));
+  if ( m_CmRegistryTransactionType != NULL )
+    printf("CmRegistryTransactionType: %p\n", PVOID(m_CmRegistryTransactionType - mz));
+  if ( m_ExpKeyedEventObjectType != NULL )
+    printf("ExpKeyedEventObjectType: %p\n", PVOID(m_ExpKeyedEventObjectType - mz));
+  if ( m_ExpWorkerFactoryObjectType != NULL )
+    printf("ExpWorkerFactoryObjectType: %p\n", PVOID(m_ExpWorkerFactoryObjectType - mz));
+  if ( m_IopWaitCompletionPacketObjectType != NULL )
+    printf("IopWaitCompletionPacketObjectType: %p\n", PVOID(m_IopWaitCompletionPacketObjectType - mz));
+  if ( m_ObpDirectoryObjectType != NULL )
+    printf("ObpDirectoryObjectType: %p\n", PVOID(m_ObpDirectoryObjectType - mz));
+  if ( m_ExProfileObjectType != NULL )
+    printf("ExProfileObjectType: %p\n", PVOID(m_ExProfileObjectType - mz));
+  if ( m_EtwpRegistrationObjectType != NULL )
+    printf("EtwpRegistrationObjectType: %p\n", PVOID(m_EtwpRegistrationObjectType - mz));
   if ( m_AlpcPortObjectType != NULL )
     printf("AlpcPortObjectType: %p\n", PVOID(m_AlpcPortObjectType - mz));
+  // dbg data
+  dump_dbg_data(mz);
+
   if ( m_PsWin32CallBack != NULL )
     printf("PsWin32CallBack: %p\n", PVOID(m_PsWin32CallBack - mz));
   if ( m_ExpHostListLock != NULL )
     printf("ExpHostListLock: %p\n", PVOID(m_ExpHostListLock - mz));
   if ( m_ExpHostList != NULL )
     printf("ExpHostList: %p\n", PVOID(m_ExpHostList - mz));
+  if ( m_CmpCallbackListLock != NULL )
+    printf("CmpCallbackListLock: %p\n", PVOID(m_CmpCallbackListLock - mz));
+  if ( m_CallbackListHead != NULL )
+    printf("CallbackListHead: %p\n", PVOID(m_CallbackListHead - mz));
   if ( m_PspLoadImageNotifyRoutine != NULL )
     printf("PspLoadImageNotifyRoutine: %p\n", PVOID(m_PspLoadImageNotifyRoutine - mz));
   if ( m_PspLoadImageNotifyRoutineCount != NULL )
@@ -127,19 +160,53 @@ void ntoskrnl_hack::dump() const
     printf("KTHREAD.Process offset:    %X\n", m_thread_process_off);
   if ( m_thread_prevmod_off )
     printf("KTHREAD.PreviousMode offset: %X\n", m_thread_prevmod_off);
+  if ( m_thread_silo_off )
+    printf("ETHREAD.Silo offset: %X\n", m_thread_silo_off);
+  if ( m_thread_TopLevelIrp_off )
+    printf("ETHREAD.TopLevelIrp offset: %X\n", m_thread_TopLevelIrp_off);
   // process offsets
   if ( m_proc_pid_off )
     printf("EPROCESS.UniqueProcessId offset: %X\n", m_proc_pid_off);
+  if ( m_proc_peb_off )
+    printf("EPROCESS.Peb offset: %X\n", m_proc_peb_off);
+  if ( m_proc_job_off )
+    printf("EPROCESS.Job offset: %X\n", m_proc_job_off);
   if ( m_proc_protection_off )
     printf("EPROCESS.Protection offset: %X\n", m_proc_protection_off);
   if ( m_proc_debport_off )
     printf("EPROCESS.DebugPort: %X\n", m_proc_debport_off);
+  if ( m_proc_secport_off )
+    printf("EPROCESS.SecurityPort: %X\n", m_proc_secport_off);
+  if ( m_proc_wow64_off )
+    printf("EPROCESS.WoW64Process: %X\n", m_proc_wow64_off);
+  if ( m_proc_win32proc_off )
+    printf("EPROCESS.Win32Process: %X\n", m_proc_win32proc_off);
+  if ( m_proc_DxgProcess_off )
+    printf("EPROCESS.DxgProcess offset: %X\n", m_proc_DxgProcess_off);
+  if ( m_proc_flags3_off )
+    printf("EPROCESS.Flags3 offset: %X\n", m_proc_flags3_off);
   if ( eproc_ObjectTable_off )
     printf("EPROCESS.ObjectTable: %X\n", eproc_ObjectTable_off);
   if ( eproc_ProcessLock_off )
     printf("EPROCESS.RundownProtect: %X\n", eproc_ProcessLock_off);
   if ( ObjectTable_pushlock_off )
     printf("HANDLE_TABLE.HandleContentionEvent: %X\n", ObjectTable_pushlock_off);
+  // wmi
+  dump_wmi(mz);
+  // silo
+  dump_silo(mz);
+  // emp
+  dump_emp(mz);
+  // kpte
+  if ( m_MiGetPteAddress != NULL )
+    printf("MiGetPteAddress: %p\n", PVOID(m_MiGetPteAddress - mz));
+  if ( m_pte_base_addr != NULL )
+    printf("pte_base_addr at: %p\n", PVOID(m_pte_base_addr - mz));
+  // hypervisor
+  if ( m_HvlpFlags != NULL )
+    printf("HvlpFlags: %p\n", PVOID(m_HvlpFlags - mz));
+  if ( m_HvlpAa64Connected != NULL )
+    printf("HvlpAa64Connected: %p\n", PVOID(m_HvlpAa64Connected - mz));
   dump_sign_data();
 }
 
@@ -150,7 +217,14 @@ int ntoskrnl_hack::hack(int verbose)
     return 0;
   int res = 0;
   PBYTE mz = m_pe->base_addr();
-  const export_item *exp = m_ed->find("ExInitializePagedLookasideList");
+  // first resolve guard_dispatch_icall
+  const export_item *exp = m_ed->find("RtlGetCompressionWorkSpaceSize");
+  if ( exp != NULL )
+    res += find_first_jmp(mz + exp->rva, aux_dispatch_icall);
+  if ( aux_dispatch_icall != NULL )
+    res += find_crash_tab(mz);
+  // lookaside lists & locks
+  exp = m_ed->find("ExInitializePagedLookasideList");
   if ( exp != NULL )
   {
     PBYTE next = NULL;
@@ -164,9 +238,21 @@ int ntoskrnl_hack::hack(int verbose)
     if ( find_first_jmp(mz + exp->rva, next) )
       res += find_lock_list(next, m_ExNPagedLookasideLock, m_ExNPagedLookasideListHead);
   }
+  exp = m_ed->find("MmFreeNonCachedMemory");
+  if ( exp != NULL )
+  {
+    res += find_first_bl(mz + exp->rva, m_MiGetPteAddress);
+    if ( m_MiGetPteAddress != NULL )
+     res += disasm_MiGetPteAddress(m_MiGetPteAddress);
+  }
+  // WMI data
+  res += hack_wmi(mz);
+
   exp = m_ed->find("IoRegisterPlugPlayNotification");
   if ( exp != NULL )
     res += disasm_IoRegisterPlugPlayNotification(mz + exp->rva);
+
+  // tracepoints
   exp = m_ed->find("KeSetTracepoint");
   if ( exp != NULL ) 
    try
@@ -174,19 +260,46 @@ int ntoskrnl_hack::hack(int verbose)
      res += hack_tracepoints(mz + exp->rva);
    } catch(std::bad_alloc)
    { }
+  if ( m_KiTpHashTable != NULL )
+    res += find_trace_sdt(mz);
+
+  if ( !m_stab.empty() )
+    res += find_stab_types(mz);
+
+  // ssdt
   DWORD ep = m_pe->entry_point();
   if ( ep )
-   try
-   {
-     res += hack_entry(mz + ep);
-   } catch(std::bad_alloc)
-   { }
+  try
+  {
+    res += hack_entry(mz + ep);
+  } catch(std::bad_alloc)
+  { }
+
   if ( m_KiServiceTable != NULL )
   {
     PBYTE addr = NULL;
     if ( get_nt_addr("ZwQuerySymbolicLinkObject", addr) )
       res += hack_obref_type(addr, m_ObpSymbolicLinkObjectType, ".data");
+//    if ( get_nt_addr("ZwWaitForDebugEvent", addr) )
+//      res += hack_obref_type(addr, m_DbgkDebugObjectType, "ALMOSTRO");
+    addr = NULL;
+    if ( get_nt_addr("ZwDeleteKey", addr) )
+     res += hack_CmpTraceRoutine(addr);
   }
+  if ( m_DbgkDebugObjectType == NULL )
+    res += find_DbgkDebugObjectType_by_sign(mz, 0xC0000712);
+  res += find_DbgpInsertDebugPrintCallback_by_sign(mz);
+  exp = m_ed->find("DbgQueryDebugFilterState");
+  if ( exp != NULL )
+  {
+    PBYTE next = NULL;
+    if ( find_first_jmp(mz + exp->rva, next) )
+      res += hack_kd_masks(next);
+  }
+  exp = m_ed->find("KdRefreshDebuggerNotPresent");
+  if ( exp != NULL )
+    res += resolve_KdPitchDebugger(mz + exp->rva);
+
   if ( m_KeLoaderBlock != NULL )
   {
     res += find_SepInitializeCodeIntegrity_by_sign(mz, 0xA000009);
@@ -195,6 +308,26 @@ int ntoskrnl_hack::hack(int verbose)
     if ( m_SeCiCallbacks == NULL )
       res += find_SepInitializeCodeIntegrity_by_sign(mz, 0xA000007);
   }
+
+  // bugcheck data
+  exp = m_ed->find("FsRtlUninitializeFileLock");
+  if ( exp != NULL )
+    res += find_KxAcquireSpinLock(mz + exp->rva);
+  exp = m_ed->find("KeRegisterBugCheckCallback");
+  if ( exp != NULL )
+    res += hack_bugcheck(mz + exp->rva);
+  exp = m_ed->find("KeRegisterBugCheckReasonCallback");
+  if ( exp != NULL )
+    res += hack_bugcheck_reason(mz + exp->rva);
+
+  // silo data
+  exp = m_ed->find("PsStartSiloMonitor");
+  if ( exp != NULL )
+    res += hack_start_silo(mz + exp->rva);
+  exp = m_ed->find("PsGetServerSiloServiceSessionId");
+  if ( exp != NULL )
+    res += hack_silo_global(mz + exp->rva);
+
   exp = m_ed->find("ExRegisterExtension");
   if ( exp != NULL )
     res += hack_reg_ext(mz + exp->rva);
@@ -207,6 +340,10 @@ int ntoskrnl_hack::hack(int verbose)
     else
       res += hack_timers(mz + exp->rva);
   }
+  // emp data
+  exp = m_ed->find("EmpProviderRegister");
+  if ( exp != NULL )
+    res += hack_emp(mz + exp->rva);
   // kernel notifications
   exp = m_ed->find("PsEstablishWin32Callouts");
   if ( exp != NULL )
@@ -224,6 +361,14 @@ int ntoskrnl_hack::hack(int verbose)
   exp = m_ed->find("SeRegisterLogonSessionTerminatedRoutineEx");
   if ( exp != NULL )
     res += hask_se_logon(mz + exp->rva);
+  exp = m_ed->find("CmUnRegisterCallback");
+  if ( exp != NULL )
+  {
+    res += hack_cm_cbs(mz + exp->rva);
+    if ( !is_cm_cbs_ok() )
+      res += hack_cm_cbs2(mz + exp->rva);
+  }
+  // obtypes
   exp = m_ed->find("ObReferenceObjectByPointerWithTag");
   if ( exp != NULL ) 
     res += hack_ob_types(mz + exp->rva);
@@ -249,18 +394,122 @@ int ntoskrnl_hack::hack(int verbose)
   exp = m_ed->find("ExGetPreviousMode");
   if ( exp != NULL )
     res += hack_x18(mz + exp->rva, m_thread_prevmod_off);
+  exp = m_ed->find("PsIsCurrentThreadInServerSilo");
+  if ( exp != NULL )
+    res += hack_x18(mz + exp->rva, m_thread_silo_off);
+  exp = m_ed->find("IoGetTopLevelIrp");
+  if ( exp != NULL )
+    res += hack_x18(mz + exp->rva, m_thread_TopLevelIrp_off);
   // process offsets
   exp = m_ed->find("PsGetProcessId");
   if ( exp != NULL )
     res += hack_x0_ldr(mz + exp->rva, m_proc_pid_off);
+  exp = m_ed->find("PsGetProcessPeb");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_peb_off);
+  exp = m_ed->find("PsGetProcessJob");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_job_off);
+  exp = m_ed->find("PsGetProcessWow64Process");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_wow64_off);
+  exp = m_ed->find("PsGetProcessWin32Process");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_win32proc_off);
+  exp = m_ed->find("PsGetProcessDxgProcess");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_DxgProcess_off);
   exp = m_ed->find("PsGetProcessProtection");
   if ( exp != NULL )
     res += hack_x0_ldr(mz + exp->rva, m_proc_protection_off);
   exp = m_ed->find("PsGetProcessDebugPort");
   if ( exp != NULL )
     res += hack_x0_ldr(mz + exp->rva, m_proc_debport_off);
+  exp = m_ed->find("PsGetProcessSecurityPort");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_secport_off);
+  exp = m_ed->find("PsIsSystemProcess");
+  if ( exp != NULL )
+    res += hack_x0_ldr(mz + exp->rva, m_proc_flags3_off);
+
+  // hypervisor
+  exp = m_ed->find("HvlQueryActiveProcessors");
+  if ( exp != NULL )
+    res += hack_hvl_flags(mz + exp->rva, m_HvlpFlags, "ALMOSTRO");
+  exp = m_ed->find("HvlQueryConnection");
+  if ( exp != NULL )
+    res += hack_hvl_flags(mz + exp->rva, m_HvlpAa64Connected, "CFGRO");
+
   res += try_find_PsKernelRangeList(mz);
   return res;
+}
+
+int ntoskrnl_hack::hack_hvl_flags(PBYTE psp, PBYTE &out_res, const char *s_name)
+{
+  if ( !setup(psp) )
+    return 0;
+  regs_pad used_regs;
+  for ( DWORD i = 0; i < 10; i++ )
+  {
+    if ( !disasm() || is_ret() )
+      return 0;
+    if ( is_adrp(used_regs) )
+      continue;
+    if ( is_add() )
+    {
+      PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
+      if ( in_section(what, s_name) )
+        out_res = what;
+      break;
+    }
+    if ( is_ldr() ) 
+    {
+       PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
+       if ( in_section(what, s_name) )
+         out_res = what;
+       break;
+    }
+  }
+  return (out_res != NULL);
+}
+
+int ntoskrnl_hack::find_DbgkDebugObjectType_by_sign(PBYTE mz, DWORD sign)
+{
+  // try search in PAGE section
+  const one_section *s = m_pe->find_section_by_name("PAGE");
+  if ( NULL == s )
+    return 0;
+  PBYTE start = mz + s->va;
+  PBYTE end = start + s->size;
+  bm_search srch((const PBYTE)&sign, sizeof(sign));
+  PBYTE curr = start;
+  std::list<PBYTE> founds;
+  while ( curr < end )
+  {
+    const PBYTE fres = srch.search(curr, end - curr);
+    if ( NULL == fres )
+      break;
+    try
+    {
+      founds.push_back(fres);
+    } catch(std::bad_alloc)
+    { return 0; }
+    curr = fres + sizeof(sign);
+  }
+  if ( founds.empty() )
+    return 0;
+  for ( auto citer = founds.cbegin(); citer != founds.cend(); ++citer )
+  {
+    PBYTE func = find_pdata(*citer);
+#ifdef _DEBUG
+    printf("find_DbgkDebugObjectType_by_sign: found at %p, func %p\n", *citer - mz, func);
+#endif/* _DEBUG */
+    if ( NULL == func )
+      continue;
+    if ( hack_obref_type(func, m_DbgkDebugObjectType, "ALMOSTRO") )
+      return 1;
+  }
+  return 0;
 }
 
 int ntoskrnl_hack::find_SepInitializeCodeIntegrity_by_sign(PBYTE mz, DWORD sign)
@@ -580,59 +829,6 @@ int ntoskrnl_hack::hack_ex_cbs_aux(PBYTE psp)
   return (m_PsWin32CallBack != NULL);
 }
 
-int ntoskrnl_hack::resolve_notify(PBYTE psp, PBYTE &list, PBYTE &count)
-{
-  count = NULL;
-  list = NULL;
-  if ( !setup(psp) )
-    return 0;
-  int state = 0; // 0 - wait for ExAllocateCallBack
-                 // 1 - get list
-                 // 2 - wait for ExCompareExchangeCallBack
-                 // 3 - add magic to get count
-  regs_pad used_regs;
-  for ( DWORD i = 0; i < 200; i++ )
-  {
-    if ( !disasm(state) || is_ret() )
-      return 0;
-    if ( is_adrp(used_regs) )
-      continue;
-    // check for call
-    PBYTE caddr = NULL;
-    if ( is_bl_jimm(caddr) )
-    {
-      if ( !state && (caddr == aux_ExAllocateCallBack) )
-        state = 1;
-      else if ( (2 == state) && (caddr == aux_ExCompareExchangeCallBack) )
-        state = 3;
-    }
-    if ( is_add() )
-    {
-      PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
-      if ( 1 == state )
-      {
-        if ( !in_section(what, ".data") )
-          used_regs.zero(get_reg(0));
-        else {
-          list = what;
-          state = 2;
-        }      
-      } else if ( 3 == state )
-      {
-        if ( !in_section(what, "PAGEDATA") )
-          used_regs.zero(get_reg(0));
-        else
-          state = 4;
-      } else if (4 == state)
-      {
-        count = what;
-        break;
-      }
-    }
-  }
-  return (list != NULL) && (count != NULL);
-}
-
 int ntoskrnl_hack::find_lock_list(PBYTE psp, PBYTE &lock, PBYTE &list)
 {
   lock = NULL;
@@ -670,73 +866,6 @@ int ntoskrnl_hack::find_lock_list(PBYTE psp, PBYTE &lock, PBYTE &list)
     }
   }
   return (lock != NULL) && (list != NULL);
-}
-
-int ntoskrnl_hack::hack_obref_type(PBYTE psp, PBYTE &off, const char *s_name)
-{
-  if ( !setup(psp) )
-    return 0;
-  cf_graph<PBYTE> cgraph;
-  std::list<PBYTE> addr_list;
-  addr_list.push_back(psp);
-  int edge_n = 0;
-  int edge_gen = 0;
-  off = NULL;
-  while( edge_gen < 100 )
-  {
-    for ( auto iter = addr_list.cbegin(); iter != addr_list.cend(); ++iter )
-    {
-      psp = *iter;
-      if ( m_verbose )
-        printf("hack_obref_type: %p, edge_gen %d, edge_n %d\n", psp, edge_gen, edge_n);
-      if ( cgraph.in_ranges(psp) )
-        continue;
-      if ( !setup(psp) )
-        continue;
-      regs_pad used_regs;
-      edge_n++;
-      for ( DWORD i = 0; i < 100; i++ )
-      {
-        if ( !disasm() || is_ret() )
-          break;
-        if ( check_jmps(cgraph) )
-          continue;
-        // check for last b xxx
-        PBYTE b_addr = NULL;
-        if ( is_b_jimm(b_addr) )
-        {
-          cgraph.add(b_addr);
-          break;
-        }
-        if ( is_adrp(used_regs) )
-          continue;
-        if ( is_ldr() ) 
-        {
-          PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
-          if ( !in_section(what, s_name) )
-            used_regs.zero(get_reg(0));
-        }
-        // check for call
-        PBYTE caddr = NULL;
-        if ( is_bl_jimm(caddr) )
-        {
-           if ( caddr == aux_ObReferenceObjectByHandle )
-           {
-             off = (PBYTE)used_regs.get(AD_REG_X2);
-             goto end;
-           }
-        }
-      }
-      cgraph.add_range(psp, m_psp - psp);
-    }
-    // prepare for next edge generation
-    edge_gen++;
-    if ( !cgraph.delete_ranges(&cgraph.ranges, &addr_list) )
-      break;    
-  }
-end:
-  return (off != NULL);
-
 }
 
 int ntoskrnl_hack::hack_sdt(PBYTE psp)
@@ -883,88 +1012,19 @@ end:
   return hack_sdt(KiInitializeKernel);
 }
 
-int ntoskrnl_hack::hack_tracepoints(PBYTE psp)
+int ntoskrnl_hack::disasm_MiGetPteAddress(PBYTE psp)
 {
-  statefull_graph<PBYTE, int> cgraph;
-  std::list<std::pair<PBYTE, int> > addr_list;
-  auto curr = std::make_pair(psp, 0);
-  addr_list.push_back(curr);
-  int edge_n = 0;
-  int edge_gen = 0;
-  while( edge_gen < 100 )
+  if ( !setup(psp) )
+    return 0;
+  for ( DWORD i = 0; i < 5; i++ )
   {
-    for ( auto iter = addr_list.cbegin(); iter != addr_list.cend(); ++iter )
+    if ( !disasm() || is_ret() )
+      return 0;
+    if ( is_ldr_off() )
     {
-      psp = iter->first;
-      int state = iter->second;
-      if ( m_verbose )
-        printf("hack_tracepoints: %p, state %d, edge_gen %d, edge_n %d\n", psp, state, edge_gen, edge_n);
-      if ( cgraph.in_ranges(psp) )
-        continue;
-      if ( !setup(psp) )
-        continue;
-      regs_pad used_regs;
-      edge_n++;
-      for ( ; ; )
-      {
-        if ( !disasm(state) || is_ret() )
-          break;
-        if ( check_jmps(cgraph, state) )
-          continue;
-        // check for last b xxx
-        PBYTE b_addr = NULL;
-        if ( is_b_jimm(b_addr) )
-        {
-          cgraph.add(b_addr, state);
-          break;
-        }
-        // adrp/adr pair
-        if ( is_adrp(used_regs) )
-          continue;
-        if ( is_ldr() )
-        {
-          PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
-          if ( in_section(what, "ALMOSTRO") )
-          {
-            if ( !state )
-            {
-              m_KiDynamicTraceEnabled = what;
-              state = 1;
-              continue;
-            }
-          } else if ( in_section(what, ".data") )
-          {
-            if ( 2 == state )
-            {
-              m_KiTpHashTable = what;
-              goto end;
-            }
-          }
-        } else
-          used_regs.zero(get_reg(0));
-        if ( is_add() )
-        {
-          PBYTE what = (PBYTE)used_regs.add(get_reg(0), get_reg(1), m_dis.operands[2].op_imm.bits);
-          if ( !in_section(what, ".data") )
-            used_regs.zero(get_reg(0));
-        }
-        // check for call
-        if ( is_bl_jimm(b_addr) )
-        {
-           if (b_addr == aux_ExAcquirePushLockExclusiveEx )
-           {
-             state = 2;
-             m_KiTpStateLock = (PBYTE)used_regs.get(AD_REG_X0);
-           }
-        }
-      }
-      cgraph.add_range(psp, m_psp - psp);
+      m_pte_base_addr = (PBYTE)m_dis.operands[1].op_imm.bits;
+      break;
     }
-    // prepare for next edge generation
-    edge_gen++;
-    if ( !cgraph.delete_ranges(&cgraph.ranges, &addr_list) )
-      break;    
   }
-end:
-  return (m_KiTpStateLock != NULL) && (m_KiTpHashTable != NULL);
+  return (m_pte_base_addr != NULL);
 }
